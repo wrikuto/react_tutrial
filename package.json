@@ -1,0 +1,11 @@
+{
+    "name": "docker-compose-sample",
+    "version": "1.0.0",
+    "description": "A simple Node.js app for Docker Compose study",
+    "main": "index.js",
+    "scripts": {
+      "start": "node index.js"
+    },
+    "author": "Your Name",
+    "license": "MIT"
+  }

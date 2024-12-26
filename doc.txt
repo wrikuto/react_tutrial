@@ -1,0 +1,204 @@
+以下では、フロントエンド (Next.js)・バックエンド (FastAPI)・AIエージェント (langgraph)・データベース (MySQL) を連携させるための Docker 構成の一例を示します。あくまでサンプルなので、実際のアプリ要件に合わせて修正してください。
+1. 全体像
+
+典型的には Docker Compose を使い、以下のようにサービスを分割します。
+
+    front: Next.js (Node.js)
+    backend: FastAPI + langgraph
+    db: MySQL
+
+langgraph を使う場合、FastAPI のアプリケーションコードやサービス起動時に langgraph をインポート・利用する形にすると良いでしょう。
+
+    「バックエンドのコンテナ」に langgraph の依存パッケージを入れてしまう
+    FastAPI のエンドポイントから langgraph を呼び出す
+
+    ※ langgraph を単独のコンテナにするパターンもありますが、多くの場合は FastAPI や他のバックエンドフレームワークと一体化させることが多いです。
+
+2. ディレクトリ構成の例
+
+以下は一例です。
+
+your-llm-app/
+├─ front/              # Next.js プロジェクト
+│   ├─ Dockerfile
+│   └─ package.json
+├─ backend/            # FastAPI + langgraph プロジェクト
+│   ├─ Dockerfile
+│   ├─ requirements.txt
+│   └─ app/
+│       ├─ main.py     # FastAPIエントリポイント
+│       └─ ...         # langgraph利用のコードなど
+├─ docker-compose.yml
+└─ ...
+
+3. Dockerfile の例
+3-1. Front (Next.js) の Dockerfile 例
+
+# your-llm-app/front/Dockerfile
+
+# Node.js の公式イメージをベースにする
+FROM node:18-alpine
+
+# 作業ディレクトリを設定
+WORKDIR /app
+
+# package.json と package-lock.json をコピー
+COPY package*.json ./
+
+# 依存関係のインストール
+RUN npm install
+
+# アプリケーションのソースコードをコピー
+COPY . .
+
+# Next.js のビルド
+RUN npm run build
+
+# ポート番号 (例: 3000) を公開
+EXPOSE 3000
+
+# Next.js を起動
+CMD ["npm", "run", "start"]
+
+3-2. Backend (FastAPI + langgraph) の Dockerfile 例
+
+# your-llm-app/backend/Dockerfile
+
+FROM python:3.10-slim
+
+# 必要に応じて OSレベルの依存パッケージをインストール
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# requirements.txt を先にコピーして依存関係をまとめてインストール
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ソースコードをコピー
+COPY . .
+
+# ポート番号 (FastAPI: uvicornデフォルト8000など)
+EXPOSE 8000
+
+# FastAPI 実行コマンド (例)
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+    requirements.txt には、fastapi, langgraph, uvicorn など必要なライブラリを記載。
+
+4. docker-compose.yml の例
+
+version: "3.9"
+services:
+  front:
+    build:
+      context: ./front
+      dockerfile: Dockerfile
+    container_name: llm_front
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    # Next.js が SSR などで API を叩く場合に環境変数などを設定
+    environment:
+      - BACKEND_URL=http://backend:8000
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: llm_backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=llm_db
+      - DB_USER=root
+      - DB_PASSWORD=example
+      # OpenAI APIキー等もここで指定する場合あり
+      - OPENAI_API_KEY=sk-xxxxxx
+    # ネットワーク越しに DBへ接続するため、mysqlclient やSQLAlchemyなどを使う
+
+  db:
+    image: mysql:8.0
+    container_name: llm_db
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=example
+      - MYSQL_DATABASE=llm_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+
+volumes:
+  db_data:
+
+4-1. ポイント
+
+    front → backend
+        Next.js から API コールするときは、Docker Compose のサービス名 (backend) を使って http://backend:8000/... のようにアクセスできます。
+    backend → db
+        同様に db という名前で MySQL コンテナにアクセスできます。
+    環境変数
+        データベース接続情報、OpenAI APIキーなどを environment で定義。
+        本番運用 では機密情報を .env やシークレット管理サービスに分離し、.gitignore する。
+    volumes
+        MySQL のデータ永続化のために volume (db_data) を設定。
+
+5. 起動手順
+
+    ルートディレクトリ (your-llm-app/) で以下のコマンドを実行。
+
+    docker-compose build
+    docker-compose up -d
+
+    ブラウザで http://localhost:3000 (front) にアクセスし、Next.js アプリが表示されるか確認。
+    http://localhost:8000 (backend) にアクセスすると、FastAPI のデフォルトドキュメント (OpenAPI など) が見られる。
+    MySQL はホストの 3306 ポートで待ち受けているので、必要に応じて mysql -h 127.0.0.1 -P 3306 -u root -p などで接続テスト。
+
+6. langgraph の利用方法のイメージ
+
+FastAPI 側の main.py (例) で langgraph をインポートし、LLM を呼び出すフローを定義します。OpenAI APIキーは環境変数などから取得します。
+
+# your-llm-app/backend/app/main.py
+from fastapi import FastAPI
+import os
+import langgraph  # 仮のimport例: 実際の利用方法にあわせて
+
+app = FastAPI()
+
+@app.get("/chat")
+def chat_endpoint(query: str):
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    # langgraph で OpenAI を呼び出すなど
+    # response = langgraph.some_function(query, openai_api_key)
+    response = f"Dummy response for '{query}' with key={openai_api_key}"
+    return {"answer": response}
+
+Next.js からこの /chat エンドポイントを叩き、ユーザーの入力を送信すると、langgraph 経由で LLM (OpenAI) へ問い合わせ → レスポンスを返すような動作になります。
+7. 運用上の注意点
+
+    機密情報 (API Keys) の保管
+        .env ファイルなどにまとめて書き、docker-compose.yml と同じ階層で env_file: .env として読み込む方式が便利です。
+    ビルドサイズ
+        Next.js と Python を分離することでコンテナが肥大化しすぎないようにしています。
+    スケーリング
+        大規模アクセスがある場合は、docker-compose から Kubernetes へ移行検討、あるいは各サービスのレプリカ数を増やすなどスケール戦略を考慮。
+    SSL/TLS
+        本番では HTTPS が必要になるため、リバースプロキシ (nginx, Traefik など) のコンテナを追加して SSL/TLS ターミネーションを行う構成が一般的です。
+
+まとめ
+
+    フロントエンド (Next.js) と バックエンド (FastAPI + langgraph) は分けてコンテナ化し、それぞれに Dockerfile を用意。
+    データベース (MySQL) は公式イメージを利用し、Docker Compose で一緒に管理。
+    Docker Compose でネットワークを共有し、サービス名で相互アクセス可能に。
+    機密情報は .env や秘密管理サービスで安全に取り扱う。
+    langgraph を使う部分は、基本的にバックエンドのコンテナ内 (Python 側) に含めておく。
+
+この構成であれば、Next.js でフロントを SSR or SPA 形式で実装し、FastAPI で AI エージェント (langgraph + OpenAI API) を呼び出し、MySQL にデータを格納する一連のパイプラインが整います。必要に応じて認証やログ管理などを追加し、本番運用向けに拡張していきましょう。
+
